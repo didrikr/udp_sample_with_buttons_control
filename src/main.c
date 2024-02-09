@@ -5,12 +5,15 @@
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/device.h>
+
 #include <stdio.h>
+
+#include <nrf_modem.h>
 #include <modem/lte_lc.h>
-#include <zephyr/net/socket.h>
 #include <nrf_modem_at.h>
-#include <device.h>
-#include <drivers/gpio.h>
+#include <zephyr/net/socket.h>
 
 #define UDP_IP_HEADER_SIZE 28
 
@@ -346,9 +349,16 @@ static int configure_low_power(void)
         return err;
 }
 
-static void modem_init(void)
+static int modem_init(void)
 {
         int err;
+
+        err = nrf_modem_lib_init();
+        if (err)
+        {
+                printk("Failed to init the modem library, error: %d\n", err);
+                return err;
+        }
 
         if (IS_ENABLED(CONFIG_LTE_AUTO_INIT_AND_CONNECT))
         {
@@ -360,9 +370,11 @@ static void modem_init(void)
                 if (err)
                 {
                         printk("Modem initialization failed, error: %d\n", err);
-                        return;
+                        return err;
                 }
         }
+
+        return 0;
 }
 
 static void modem_connect(void)
@@ -463,7 +475,7 @@ static void work_init(void)
                               lte_set_connection_work_fn);
 }
 
-void main(void)
+int main(void)
 {
         int err;
         printk("UDP sample has started\n");
@@ -482,7 +494,13 @@ void main(void)
          * because the enabling of RAI is dependent on the
          * configured network mode which is set during modem initialization.
          */
-        modem_init();
+        err = modem_init();
+        if (err)
+        {
+                printk("Failed to initialize the modem. Aborting\n");
+                return 1;
+        }
+
         err = configure_low_power();
         if (err)
         {
@@ -500,9 +518,10 @@ void main(void)
         if (err)
         {
                 printk("Not able to initialize UDP server connection\n");
-                return;
+                return 1;
         }
 
         work_init();
         k_work_schedule(&server_transmission_work, K_NO_WAIT);
+        return 0;
 }
