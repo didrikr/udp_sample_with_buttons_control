@@ -25,18 +25,18 @@
 #define SW1_NODE DT_ALIAS(sw2)
 #define SW2_NODE DT_ALIAS(sw3)
 
-#if !(DT_NODE_HAS_STATUS(BT1_NODE, okay) && DT_NODE_HAS_STATUS(BT2_NODE, okay) && DT_NODE_HAS_STATUS(SW1_NODE, okay) && DT_NODE_HAS_STATUS(SW2_NODE, okay))
+#if !(DT_NODE_HAS_STATUS(BT1_NODE, okay) && DT_NODE_HAS_STATUS(BT2_NODE, okay) \
+        && DT_NODE_HAS_STATUS(SW1_NODE, okay) && DT_NODE_HAS_STATUS(SW2_NODE, okay))
 #error "Unsupported board: button devicetree alias is not defined"
 #endif
+
 static const struct gpio_dt_spec buttons[] = {
-	GPIO_DT_SPEC_GET_OR(BT1_NODE, gpios,
-						{0}),
-	GPIO_DT_SPEC_GET_OR(BT2_NODE, gpios,
-						{0}),
-	GPIO_DT_SPEC_GET_OR(SW1_NODE, gpios,
-						{0}),
-	GPIO_DT_SPEC_GET_OR(SW2_NODE, gpios,
-						{0})};
+	GPIO_DT_SPEC_GET_OR(BT1_NODE, gpios, {0}),
+	GPIO_DT_SPEC_GET_OR(BT2_NODE, gpios, {0}),
+	GPIO_DT_SPEC_GET_OR(SW1_NODE, gpios, {0}),
+	GPIO_DT_SPEC_GET_OR(SW2_NODE, gpios, {0})
+};
+
 static struct gpio_callback button_cb_data[4];
 
 static int client_fd;
@@ -44,32 +44,31 @@ static struct sockaddr_storage host_addr;
 static struct k_work_delayable server_transmission_work;
 static struct k_work_delayable lte_set_connection_work;
 
-static volatile enum state_type { LTE_STATE_ON,
-                                  LTE_STATE_OFFLINE,
-                                  LTE_STATE_BUSY } LTE_Connection_Current_State;
+static volatile enum state_type { 
+        LTE_STATE_ON,
+        LTE_STATE_OFFLINE,
+        LTE_STATE_BUSY 
+} LTE_Connection_Current_State;
+
 static volatile enum state_type LTE_Connection_Target_State;
 static volatile bool PSM_Enable;
 static volatile bool RAI_Enable;
 static volatile bool PSM_Enable_pr;
 static volatile bool RAI_Enable_pr;
 
+/** Need to enable release 14 RAI feature at offline mode before run this command **/
 int lte_lc_rel14feat_rai_req(bool enable)
-{ /** Need to enable release 14 RAI feature at offline mode before run this command **/
-        // err = nrf_modem_at_printf("AT%%REL14FEAT=0,1,0,0,0");
-        // if (err) {
-        // 	printk("Release 14 RAI feature AT-command failed, err %d", err);
-        // }
+{ 
         int err;
+
         enum lte_lc_system_mode mode;
 
         err = lte_lc_system_mode_get(&mode, NULL);
-        if (err)
-        {
+        if (err) {
                 return -EFAULT;
         }
 
-        switch (mode)
-        {
+        switch (mode) {
         case LTE_LC_SYSTEM_MODE_LTEM:
         case LTE_LC_SYSTEM_MODE_LTEM_GPS:
         case LTE_LC_SYSTEM_MODE_NBIOT:
@@ -83,17 +82,13 @@ int lte_lc_rel14feat_rai_req(bool enable)
                 return -EOPNOTSUPP;
         }
 
-        if (enable)
-        {
+        if (enable) {
                 err = nrf_modem_at_printf("AT%%RAI=1");
-        }
-        else
-        {
+        } else {
                 err = nrf_modem_at_printf("AT%%RAI=0");
         }
 
-        if (err)
-        {
+        if (err) {
                 printk("nrf_modem_at_printf failed, reported error: %d", err);
                 return -EFAULT;
         }
@@ -109,22 +104,22 @@ void button_pressed(const struct device *dev, struct gpio_callback *cb,
         printk("Button pressed at %" PRIu32 "\n", k_cycle_get_32());
 
         val = gpio_pin_get_dt(&buttons[0]);
-        if (val == 1 && LTE_Connection_Current_State == LTE_STATE_ON) // button1 pressed
-        {
+
+        /* Button 1 pressed */
+        if (val == 1 && LTE_Connection_Current_State == LTE_STATE_ON) {
                 printk("Send UDP package!\n");
                 k_work_reschedule(&server_transmission_work, K_NO_WAIT);
         }
 
         val = gpio_pin_get_dt(&buttons[1]);
-        if (val == 1) // button2 pressed
-        {
-                if (LTE_Connection_Current_State == LTE_STATE_ON)
-                {
+
+        /* Button 2 pressed */
+        if (val == 1) {
+                if (LTE_Connection_Current_State == LTE_STATE_ON) {
                         LTE_Connection_Target_State = LTE_STATE_OFFLINE;
                         k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
                 }
-                else if (LTE_Connection_Current_State == LTE_STATE_OFFLINE)
-                {
+                else if (LTE_Connection_Current_State == LTE_STATE_OFFLINE) {
                         LTE_Connection_Target_State = LTE_STATE_ON;
                         k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
                 }
@@ -133,10 +128,8 @@ void button_pressed(const struct device *dev, struct gpio_callback *cb,
 #if defined(CONFIG_UDP_PSM_ENABLE)
         val = gpio_pin_get_dt(&buttons[2]);
         PSM_Enable = val;
-        if (PSM_Enable != PSM_Enable_pr)
-        {
-                if (LTE_STATE_ON == LTE_Connection_Current_State)
-                {
+        if (PSM_Enable != PSM_Enable_pr) {
+                if (LTE_STATE_ON == LTE_Connection_Current_State) {
                         printk("PSM mode setting is changed, configure and reconnect network!\n");
                         k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
                         LTE_Connection_Target_State = LTE_STATE_ON;
@@ -150,11 +143,9 @@ void button_pressed(const struct device *dev, struct gpio_callback *cb,
 #if defined(CONFIG_UDP_RAI_ENABLE)
         val = gpio_pin_get_dt(&buttons[3]);
         RAI_Enable = val;
-        if (RAI_Enable != RAI_Enable_pr)
-        {
-                printk("RAI is %s!",(RAI_Enable)? "ENABLED":"DISABLED");
-                if (LTE_STATE_ON == LTE_Connection_Current_State)
-                {
+        if (RAI_Enable != RAI_Enable_pr) {
+                printk("RAI is %s!", (RAI_Enable)? "ENABLED":"DISABLED");
+                if (LTE_STATE_ON == LTE_Connection_Current_State) {
                         printk("RAI feature setting is changed, configure and reconnect network!\n");
                         k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
                         LTE_Connection_Target_State = LTE_STATE_ON;
@@ -164,17 +155,14 @@ void button_pressed(const struct device *dev, struct gpio_callback *cb,
 #else
         printk("RAI is not enabled in prj.conf!");
 #endif
-
 }
 
 void button_init(void)
 {
         int ret;
-        for (size_t i = 0; i < ARRAY_SIZE(buttons); i++)
-        {
+        for (size_t i = 0; i < ARRAY_SIZE(buttons); i++) {
                 ret = gpio_pin_configure_dt(&buttons[i], GPIO_INPUT);
-                if (ret != 0)
-                {
+                if (ret != 0) {
                         printk("Error %d: failed to configure %s pin %d\n",
                                ret, buttons[i].port->name, buttons[i].pin);
                         return;
@@ -182,8 +170,7 @@ void button_init(void)
 
                 ret = gpio_pin_interrupt_configure_dt(&buttons[i],
                                                       GPIO_INT_EDGE_TO_ACTIVE);
-                if (ret != 0)
-                {
+                if (ret != 0) {
                         printk("Error %d: failed to configure interrupt on %s pin %d\n",
                                ret, buttons[i].port->name, buttons[i].pin);
                         return;
@@ -218,8 +205,7 @@ static int server_connect(void)
         int err;
 
         client_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (client_fd < 0)
-        {
+        if (client_fd < 0) {
                 printk("Failed to create UDP socket: %d\n", errno);
                 err = -errno;
                 goto error;
@@ -227,8 +213,7 @@ static int server_connect(void)
 
         err = connect(client_fd, (struct sockaddr *)&host_addr,
                       sizeof(struct sockaddr_in));
-        if (err < 0)
-        {
+        if (err < 0) {
                 printk("Connect failed : %d\n", err);
                 goto error;
         }
@@ -244,17 +229,14 @@ error:
 #if defined(CONFIG_NRF_MODEM_LIB)
 static void lte_handler(const struct lte_lc_evt *const evt)
 {
-        switch (evt->type)
-        {
+        switch (evt->type) {
         case LTE_LC_EVT_NW_REG_STATUS:
                 printk("Network registration status: %d\n",
                        evt->nw_reg_status);
 
                 if ((evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_HOME) &&
-                    (evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_ROAMING))
-                {
-                        if (evt->nw_reg_status == 0)
-                        {
+                    (evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_ROAMING)) {
+                        if (evt->nw_reg_status == 0) {
                                 LTE_Connection_Current_State = LTE_STATE_OFFLINE;
                                 printk("LTE OFFLINE!\n");
                                 break;
@@ -263,7 +245,8 @@ static void lte_handler(const struct lte_lc_evt *const evt)
                 }
 
                 printk("Network registration status: %s\n",
-                       evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME ? "Connected - home network" : "Connected - roaming\n");
+                        evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME ? 
+                                "Connected - home network" : "Connected - roaming\n");
                 LTE_Connection_Current_State = LTE_STATE_ON;
                 break;
         case LTE_LC_EVT_PSM_UPDATE:
@@ -278,8 +261,7 @@ static void lte_handler(const struct lte_lc_evt *const evt)
                 len = snprintf(log_buf, sizeof(log_buf),
                                "eDRX parameter update: eDRX: %f, PTW: %f\n",
                                evt->edrx_cfg.edrx, evt->edrx_cfg.ptw);
-                if (len > 0)
-                {
+                if (len > 0) {
                         printk("%s\n", log_buf);
                 }
                 break;
@@ -304,14 +286,12 @@ static int configure_low_power(void)
 #if defined(CONFIG_UDP_PSM_ENABLE)
         /** Power Saving Mode */
         err = lte_lc_psm_req(PSM_Enable);
-        if (err)
-        {
+        if (err) {
                 printk("lte_lc_psm_req, error: %d\n", err);
         }
 #else
         err = lte_lc_psm_req(false);
-        if (err)
-        {
+        if (err) {
                 printk("lte_lc_psm_req, error: %d\n", err);
         }
 #endif
@@ -319,14 +299,12 @@ static int configure_low_power(void)
 #if defined(CONFIG_UDP_EDRX_ENABLE)
         /** enhanced Discontinuous Reception */
         err = lte_lc_edrx_req(true);
-        if (err)
-        {
+        if (err) {
                 printk("lte_lc_edrx_req, error: %d\n", err);
         }
 #else
         err = lte_lc_edrx_req(false);
-        if (err)
-        {
+        if (err) {
                 printk("lte_lc_edrx_req, error: %d\n", err);
         }
 #endif
@@ -334,14 +312,12 @@ static int configure_low_power(void)
 #if defined(CONFIG_UDP_RAI_ENABLE)
         /** Enable release 14 RAI feature **/
         err = nrf_modem_at_printf("AT%%REL14FEAT=0,1,0,0,0");
-        if (err)
-        {
+        if (err) {
                 printk("Release 14 RAI feature AT-command failed, err %d", err);
         }
         /** Release Assistance Indication  */
         err = lte_lc_rel14feat_rai_req(RAI_Enable);
-        if (err)
-        {
+        if (err) {
                 printk("lte_lc_rel14feat_rai_req, error: %d\n", err);
         }
 #endif
@@ -354,21 +330,16 @@ static int modem_init(void)
         int err;
 
         err = nrf_modem_lib_init();
-        if (err)
-        {
+        if (err) {
                 printk("Failed to init the modem library, error: %d\n", err);
                 return err;
         }
 
-        if (IS_ENABLED(CONFIG_LTE_AUTO_INIT_AND_CONNECT))
-        {
+        if (IS_ENABLED(CONFIG_LTE_AUTO_INIT_AND_CONNECT)) {
                 /* Do nothing, modem is already configured and LTE connected. */
-        }
-        else
-        {
+        } else {
                 err = lte_lc_init();
-                if (err)
-                {
+                if (err) {
                         printk("Modem initialization failed, error: %d\n", err);
                         return err;
                 }
@@ -381,17 +352,12 @@ static void modem_connect(void)
 {
         int err;
 
-        if (IS_ENABLED(CONFIG_LTE_AUTO_INIT_AND_CONNECT))
-        {
+        if (IS_ENABLED(CONFIG_LTE_AUTO_INIT_AND_CONNECT)) {
                 /* Do nothing, modem is already configured and LTE connected. */
-        }
-        else
-        {
+        } else {
                 err = lte_lc_connect_async(lte_handler);
-                if (err)
-                {
-                        printk("Connecting to LTE network failed, error: %d\n",
-                               err);
+                if (err) {
+                        printk("Connecting to LTE network failed, error: %d\n", err);
                         return;
                 }
         }
@@ -404,63 +370,57 @@ static void server_transmission_work_fn(struct k_work *work)
         char buffer[CONFIG_UDP_DATA_UPLOAD_SIZE_BYTES] = {"\0"};
 
         server_connect();
-        printk("Transmitting UDP/IP payload of %d bytes to the ",
-               CONFIG_UDP_DATA_UPLOAD_SIZE_BYTES + UDP_IP_HEADER_SIZE);
-        printk("IP address %s, port number %d\n",
+
+        printk("Transmitting UDP/IP payload of %d bytes to the IP address %s, port number %d\n",
+               CONFIG_UDP_DATA_UPLOAD_SIZE_BYTES + UDP_IP_HEADER_SIZE,
                CONFIG_UDP_SERVER_ADDRESS_STATIC,
                CONFIG_UDP_SERVER_PORT);
 
-        if (RAI_Enable)
-        {
+        if (RAI_Enable) {
                 printk("Setting socket option to RAI_LAST to send last package!\n");
                 err = setsockopt(client_fd, SOL_SOCKET, SO_RAI_LAST, NULL, 0);
-                if (err < 0){
-                printk("Set socket option RAI_LAST failed : %d\n", err);
+                if (err < 0) {
+                        printk("Set socket option RAI_LAST failed : %d\n", err);
                 }
         }
 
         err = send(client_fd, buffer, sizeof(buffer), 0);
-        if (err < 0)
-        {
+        if (err < 0) {
                 printk("Failed to transmit UDP packet, %d\n", err);
                 return;
         }
+
         server_disconnect();
         k_work_schedule(&server_transmission_work,
-                        K_SECONDS(CONFIG_UDP_DATA_UPLOAD_FREQUENCY_SECONDS));
+                K_SECONDS(CONFIG_UDP_DATA_UPLOAD_FREQUENCY_SECONDS));
 }
 
 static void lte_set_connection_work_fn(struct k_work *work)
 {
         int err;
-        if (LTE_STATE_BUSY == LTE_Connection_Target_State)
-        {
+        if (LTE_STATE_BUSY == LTE_Connection_Target_State) {
                 LTE_Connection_Current_State = LTE_STATE_BUSY;
-        }
-        else
-        {
+        } else {
                 LTE_Connection_Current_State = LTE_STATE_BUSY;
-                if (LTE_STATE_OFFLINE == LTE_Connection_Target_State)
-                {
+                if (LTE_STATE_OFFLINE == LTE_Connection_Target_State) {
                         lte_lc_offline();
-                }
-                else if (LTE_STATE_ON == LTE_Connection_Target_State)
-                {
+                } else if (LTE_STATE_ON == LTE_Connection_Target_State) {
                         lte_lc_offline();
+
 #if defined(CONFIG_UDP_PSM_ENABLE)
                         err = lte_lc_psm_req(PSM_Enable);
-                        if (err)
-                        {
+                        if (err) {
                                 printk("lte_lc_psm_req, error: %d\n", err);
                         }
 #endif
+
 #if defined(CONFIG_UDP_RAI_ENABLE)
                         err = lte_lc_rel14feat_rai_req(RAI_Enable);
-                        if (err)
-                        {
+                        if (err) {
                                 printk("lte_lc_rel14feat_rai_req, error: %d\n", err);
                         }
 #endif
+
                         lte_lc_normal();
                 }
         }
@@ -469,10 +429,8 @@ static void lte_set_connection_work_fn(struct k_work *work)
 static void work_init(void)
 {
 
-        k_work_init_delayable(&server_transmission_work,
-                              server_transmission_work_fn);
-        k_work_init_delayable(&lte_set_connection_work,
-                              lte_set_connection_work_fn);
+        k_work_init_delayable(&server_transmission_work, server_transmission_work_fn);
+        k_work_init_delayable(&lte_set_connection_work, lte_set_connection_work_fn);
 }
 
 int main(void)
@@ -481,6 +439,7 @@ int main(void)
         printk("UDP sample has started\n");
 
         button_init();
+
         PSM_Enable = gpio_pin_get_dt(&buttons[2]);
         RAI_Enable = gpio_pin_get_dt(&buttons[3]);
         PSM_Enable_pr = PSM_Enable;
@@ -495,28 +454,27 @@ int main(void)
          * configured network mode which is set during modem initialization.
          */
         err = modem_init();
-        if (err)
-        {
+        if (err) {
                 printk("Failed to initialize the modem. Aborting\n");
                 return 1;
         }
 
         err = configure_low_power();
-        if (err)
-        {
+        if (err) {
                 printk("Unable to set low power configuration, error: %d\n",
                        err);
         }
+
         modem_connect();
 #endif
-        while (LTE_STATE_BUSY == LTE_Connection_Current_State)
-        {
+
+        while (LTE_STATE_BUSY == LTE_Connection_Current_State) {
                 printk("lte_set_connection BUSY!\n");
                 k_sleep(K_SECONDS(3));
         }
+
         err = server_init();
-        if (err)
-        {
+        if (err) {
                 printk("Not able to initialize UDP server connection\n");
                 return 1;
         }
