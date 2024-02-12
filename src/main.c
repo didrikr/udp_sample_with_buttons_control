@@ -310,11 +310,15 @@ static int configure_low_power(void)
 #endif
 
 #if defined(CONFIG_UDP_RAI_ENABLE)
+// %REL14FEAT is only supported (and required) on nRF9160
+#if defined(CONFIG_BOARD_NRF9160DK_NRF9160_NS)
         /** Enable release 14 RAI feature **/
         err = nrf_modem_at_printf("AT%%REL14FEAT=0,1,0,0,0");
         if (err) {
                 printk("Release 14 RAI feature AT-command failed, err %d", err);
         }
+#endif
+
         /** Release Assistance Indication  */
         err = lte_lc_rel14feat_rai_req(RAI_Enable);
         if (err) {
