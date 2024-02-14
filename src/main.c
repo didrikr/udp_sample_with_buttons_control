@@ -10,7 +10,7 @@
 
 #include <stdio.h>
 
-#include <nrf_modem.h>
+#include <modem/nrf_modem_lib.h>
 #include <modem/lte_lc.h>
 #include <nrf_modem_at.h>
 #include <zephyr/net/socket.h>
@@ -43,6 +43,8 @@ static int client_fd;
 static struct sockaddr_storage host_addr;
 static struct k_work_delayable server_transmission_work;
 static struct k_work_delayable lte_set_connection_work;
+static struct k_work_delayable psm_negotiation_work;
+static struct k_work_delayable rai_req_work;
 
 static volatile enum state_type { 
         LTE_STATE_ON,
@@ -53,11 +55,9 @@ static volatile enum state_type {
 static volatile enum state_type LTE_Connection_Target_State;
 static volatile bool PSM_Enable;
 static volatile bool RAI_Enable;
-static volatile bool PSM_Enable_pr;
-static volatile bool RAI_Enable_pr;
 
 /** Need to enable release 14 RAI feature at offline mode before run this command **/
-int lte_lc_rel14feat_rai_req(bool enable)
+int rai_req(bool enable)
 { 
         int err;
 
@@ -103,54 +103,65 @@ void button_pressed(const struct device *dev, struct gpio_callback *cb,
 
         printk("Button pressed at %" PRIu32 "\n", k_cycle_get_32());
 
-        val = gpio_pin_get_dt(&buttons[0]);
-
-        /* Button 1 pressed */
-        if (val == 1 && LTE_Connection_Current_State == LTE_STATE_ON) {
-                printk("Send UDP package!\n");
-                k_work_reschedule(&server_transmission_work, K_NO_WAIT);
+        if (pins & BIT(buttons[0].pin)) {
+                printk("Button 1\n");
+                val = gpio_pin_get_dt(&buttons[0]);
+                /* Button 1 pressed */
+                if (val == 1 && LTE_Connection_Current_State == LTE_STATE_ON) {
+                        printk("Send UDP package!\n");
+                        k_work_reschedule(&server_transmission_work, K_NO_WAIT);
+                }
         }
 
-        val = gpio_pin_get_dt(&buttons[1]);
+        if (pins & BIT(buttons[1].pin)) {
+                printk("Button 2\n");
+                val = gpio_pin_get_dt(&buttons[1]);
 
-        /* Button 2 pressed */
-        if (val == 1) {
-                if (LTE_Connection_Current_State == LTE_STATE_ON) {
-                        LTE_Connection_Target_State = LTE_STATE_OFFLINE;
-                        k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
-                }
-                else if (LTE_Connection_Current_State == LTE_STATE_OFFLINE) {
-                        LTE_Connection_Target_State = LTE_STATE_ON;
-                        k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
+                /* Button 2 pressed */
+                if (val == 1) {
+                        if (LTE_Connection_Current_State == LTE_STATE_ON) {
+                                LTE_Connection_Target_State = LTE_STATE_OFFLINE;
+                                k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
+                        }
+                        else if (LTE_Connection_Current_State == LTE_STATE_OFFLINE) {
+                                LTE_Connection_Target_State = LTE_STATE_ON;
+                                k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
+                        }
                 }
         }
 
 #if defined(CONFIG_UDP_PSM_ENABLE)
-        val = gpio_pin_get_dt(&buttons[2]);
-        PSM_Enable = val;
-        if (PSM_Enable != PSM_Enable_pr) {
-                if (LTE_STATE_ON == LTE_Connection_Current_State) {
-                        printk("PSM mode setting is changed, configure and reconnect network!\n");
-                        k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
-                        LTE_Connection_Target_State = LTE_STATE_ON;
+        if (pins & BIT(buttons[2].pin)) {
+                printk("Button 3\n");
+                val = gpio_pin_get_dt(&buttons[2]);
+#if defined(CONFIG_BOARD_NRF9160DK_NRF9160_NS)
+                PSM_Enable = val;
+                k_work_reschedule(&psm_negotiation_work, K_NO_WAIT);
+#else
+                if (val == 1) {
+                        PSM_Enable = !PSM_Enable;
+                        k_work_reschedule(&psm_negotiation_work, K_NO_WAIT);
                 }
-                PSM_Enable_pr = PSM_Enable;
-        }
+#endif
+        }       
 #else
         printk("PSM is not enabled in prj.conf!");
 #endif
 
 #if defined(CONFIG_UDP_RAI_ENABLE)
-        val = gpio_pin_get_dt(&buttons[3]);
-        RAI_Enable = val;
-        if (RAI_Enable != RAI_Enable_pr) {
-                printk("RAI is %s!", (RAI_Enable)? "ENABLED":"DISABLED");
-                if (LTE_STATE_ON == LTE_Connection_Current_State) {
-                        printk("RAI feature setting is changed, configure and reconnect network!\n");
-                        k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
-                        LTE_Connection_Target_State = LTE_STATE_ON;
+        if (pins & BIT(buttons[3].pin)) {
+                printk("Button 4\n");
+                val = gpio_pin_get_dt(&buttons[3]);
+#if defined(CONFIG_BOARD_NRF9160DK_NRF9160_NS)
+                RAI_Enable = val;
+                k_work_reschedule(&rai_req_work, K_NO_WAIT);
+#else
+                if (val == 1) {
+                        RAI_Enable = !RAI_Enable;
+                        printk("RAI is %s!\n", (RAI_Enable)? "ENABLED":"DISABLED");
+                        k_work_reschedule(&rai_req_work, K_NO_WAIT);
                 }
-                RAI_Enable_pr = RAI_Enable;
+#endif
         }
 #else
         printk("RAI is not enabled in prj.conf!");
@@ -309,20 +320,12 @@ static int configure_low_power(void)
         }
 #endif
 
-#if defined(CONFIG_UDP_RAI_ENABLE)
-// %REL14FEAT is only supported (and required) on nRF9160
-#if defined(CONFIG_BOARD_NRF9160DK_NRF9160_NS)
+#if defined(CONFIG_UDP_RAI_ENABLE) && defined(CONFIG_BOARD_NRF9160DK_NRF9160_NS)
+        /* %REL14FEAT is only supported (and required) on nRF9160 */
         /** Enable release 14 RAI feature **/
         err = nrf_modem_at_printf("AT%%REL14FEAT=0,1,0,0,0");
         if (err) {
                 printk("Release 14 RAI feature AT-command failed, err %d", err);
-        }
-#endif
-
-        /** Release Assistance Indication  */
-        err = lte_lc_rel14feat_rai_req(RAI_Enable);
-        if (err) {
-                printk("lte_lc_rel14feat_rai_req, error: %d\n", err);
         }
 #endif
 
@@ -393,6 +396,13 @@ static void server_transmission_work_fn(struct k_work *work)
                 printk("Failed to transmit UDP packet, %d\n", err);
                 return;
         }
+        if (RAI_Enable) {
+                printk("Setting socket option to RAI_NO_DATA!\n");
+                err = setsockopt(client_fd, SOL_SOCKET, SO_RAI_NO_DATA, NULL, 0);
+                if (err < 0) {
+                        printk("Set socket option RAI_NO_DATA failed : %d\n", err);
+                }
+        }
 
         server_disconnect();
         k_work_schedule(&server_transmission_work,
@@ -411,17 +421,12 @@ static void lte_set_connection_work_fn(struct k_work *work)
                 } else if (LTE_STATE_ON == LTE_Connection_Target_State) {
                         lte_lc_offline();
 
-#if defined(CONFIG_UDP_PSM_ENABLE)
-                        err = lte_lc_psm_req(PSM_Enable);
-                        if (err) {
-                                printk("lte_lc_psm_req, error: %d\n", err);
-                        }
-#endif
+
 
 #if defined(CONFIG_UDP_RAI_ENABLE)
-                        err = lte_lc_rel14feat_rai_req(RAI_Enable);
+                        err = rai_req(RAI_Enable);
                         if (err) {
-                                printk("lte_lc_rel14feat_rai_req, error: %d\n", err);
+                                printk("rai_req, error: %d\n", err);
                         }
 #endif
 
@@ -430,11 +435,33 @@ static void lte_set_connection_work_fn(struct k_work *work)
         }
 }
 
+static void psm_negotiation_work_fn(struct k_work *work)
+{
+        int err;
+        printk("PSM mode setting is changed, renegotiate PSM!\n");
+        printk("PSM_ENABLE: %d\n", PSM_Enable);
+        err = lte_lc_psm_req(PSM_Enable);
+        if (err) {
+                printk("lte_lc_psm_req, error: %d\n", err);
+        }
+}
+
+static void rai_req_work_fn(struct k_work *work)
+{
+        int err;
+        printk("RAI setting changed\n");
+        err = rai_req(RAI_Enable);
+        if (err) {
+                printk("rai_req, error: %d\n", err);
+        }
+}
+
 static void work_init(void)
 {
-
         k_work_init_delayable(&server_transmission_work, server_transmission_work_fn);
         k_work_init_delayable(&lte_set_connection_work, lte_set_connection_work_fn);
+        k_work_init_delayable(&psm_negotiation_work, psm_negotiation_work_fn);
+        k_work_init_delayable(&rai_req_work, rai_req_work_fn);
 }
 
 int main(void)
@@ -446,8 +473,6 @@ int main(void)
 
         PSM_Enable = gpio_pin_get_dt(&buttons[2]);
         RAI_Enable = gpio_pin_get_dt(&buttons[3]);
-        PSM_Enable_pr = PSM_Enable;
-        RAI_Enable_pr = RAI_Enable;
 
         LTE_Connection_Current_State = LTE_STATE_BUSY;
         LTE_Connection_Target_State = LTE_STATE_ON;
