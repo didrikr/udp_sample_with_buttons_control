@@ -7,6 +7,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/device.h>
+#include <dk_buttons_and_leds.h>
 
 #include <stdio.h>
 
@@ -16,28 +17,6 @@
 #include <zephyr/net/socket.h>
 
 #define UDP_IP_HEADER_SIZE 28
-
-/*
- * Get button configuration from the devicetree sw0 alias. This is mandatory.
- */
-#define BT1_NODE DT_ALIAS(sw0)
-#define BT2_NODE DT_ALIAS(sw1)
-#define SW1_NODE DT_ALIAS(sw2)
-#define SW2_NODE DT_ALIAS(sw3)
-
-#if !(DT_NODE_HAS_STATUS(BT1_NODE, okay) && DT_NODE_HAS_STATUS(BT2_NODE, okay) \
-        && DT_NODE_HAS_STATUS(SW1_NODE, okay) && DT_NODE_HAS_STATUS(SW2_NODE, okay))
-#error "Unsupported board: button devicetree alias is not defined"
-#endif
-
-static const struct gpio_dt_spec buttons[] = {
-	GPIO_DT_SPEC_GET_OR(BT1_NODE, gpios, {0}),
-	GPIO_DT_SPEC_GET_OR(BT2_NODE, gpios, {0}),
-	GPIO_DT_SPEC_GET_OR(SW1_NODE, gpios, {0}),
-	GPIO_DT_SPEC_GET_OR(SW2_NODE, gpios, {0})
-};
-
-static struct gpio_callback button_cb_data[4];
 
 static int client_fd;
 static struct sockaddr_storage host_addr;
@@ -53,8 +32,9 @@ static volatile enum state_type {
 } LTE_Connection_Current_State;
 
 static volatile enum state_type LTE_Connection_Target_State;
-static volatile bool PSM_Enable;
-static volatile bool RAI_Enable;
+static volatile bool PSM_Enable = true;
+static volatile bool RAI_Enable = false;
+static volatile bool buttons_prev[4] = {0};
 
 /** Need to enable release 14 RAI feature at offline mode before run this command **/
 int rai_req(bool enable)
@@ -96,101 +76,45 @@ int rai_req(bool enable)
         return 0;
 }
 
-void button_pressed(const struct device *dev, struct gpio_callback *cb,
-                    uint32_t pins)
+static void button_handler(uint32_t button_state, uint32_t has_changed)
 {
-        int val;
+        uint32_t button = button_state & has_changed;
 
-        printk("Button pressed at %" PRIu32 "\n", k_cycle_get_32());
-
-        if (pins & BIT(buttons[0].pin)) {
-                printk("Button 1\n");
-                val = gpio_pin_get_dt(&buttons[0]);
-                /* Button 1 pressed */
-                if (val == 1 && LTE_Connection_Current_State == LTE_STATE_ON) {
+        if (button & DK_BTN1_MSK) {
+                if (LTE_Connection_Current_State == LTE_STATE_ON) {
                         printk("Send UDP package!\n");
                         k_work_reschedule(&server_transmission_work, K_NO_WAIT);
                 }
         }
 
-        if (pins & BIT(buttons[1].pin)) {
-                printk("Button 2\n");
-                val = gpio_pin_get_dt(&buttons[1]);
-
-                /* Button 2 pressed */
-                if (val == 1) {
-                        if (LTE_Connection_Current_State == LTE_STATE_ON) {
-                                LTE_Connection_Target_State = LTE_STATE_OFFLINE;
-                                k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
-                        }
-                        else if (LTE_Connection_Current_State == LTE_STATE_OFFLINE) {
-                                LTE_Connection_Target_State = LTE_STATE_ON;
-                                k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
-                        }
+        if (button & DK_BTN2_MSK) {
+                if (LTE_Connection_Current_State == LTE_STATE_ON) {
+                        LTE_Connection_Target_State = LTE_STATE_OFFLINE;
+                        k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
+                }
+                else if (LTE_Connection_Current_State == LTE_STATE_OFFLINE) {
+                        LTE_Connection_Target_State = LTE_STATE_ON;
+                        k_work_reschedule(&lte_set_connection_work, K_NO_WAIT);
                 }
         }
 
 #if defined(CONFIG_UDP_PSM_ENABLE)
-        if (pins & BIT(buttons[2].pin)) {
-                printk("Button 3\n");
-                val = gpio_pin_get_dt(&buttons[2]);
-#if defined(CONFIG_BOARD_NRF9160DK_NRF9160_NS)
-                PSM_Enable = val;
+        if (button & DK_BTN3_MSK) {
+                PSM_Enable = !PSM_Enable;
                 k_work_reschedule(&psm_negotiation_work, K_NO_WAIT);
-#else
-                if (val == 1) {
-                        PSM_Enable = !PSM_Enable;
-                        k_work_reschedule(&psm_negotiation_work, K_NO_WAIT);
-                }
-#endif
         }       
 #else
         printk("PSM is not enabled in prj.conf!");
 #endif
 
-#if defined(CONFIG_UDP_RAI_ENABLE)
-        if (pins & BIT(buttons[3].pin)) {
-                printk("Button 4\n");
-                val = gpio_pin_get_dt(&buttons[3]);
-#if defined(CONFIG_BOARD_NRF9160DK_NRF9160_NS)
-                RAI_Enable = val;
+#if defined(CONFIG_UDP_PSM_ENABLE)
+        if (button & DK_BTN4_MSK) {
+                RAI_Enable = !RAI_Enable;
                 k_work_reschedule(&rai_req_work, K_NO_WAIT);
-#else
-                if (val == 1) {
-                        RAI_Enable = !RAI_Enable;
-                        printk("RAI is %s!\n", (RAI_Enable)? "ENABLED":"DISABLED");
-                        k_work_reschedule(&rai_req_work, K_NO_WAIT);
-                }
-#endif
-        }
+        }       
 #else
         printk("RAI is not enabled in prj.conf!");
 #endif
-}
-
-void button_init(void)
-{
-        int ret;
-        for (size_t i = 0; i < ARRAY_SIZE(buttons); i++) {
-                ret = gpio_pin_configure_dt(&buttons[i], GPIO_INPUT);
-                if (ret != 0) {
-                        printk("Error %d: failed to configure %s pin %d\n",
-                               ret, buttons[i].port->name, buttons[i].pin);
-                        return;
-                }
-
-                ret = gpio_pin_interrupt_configure_dt(&buttons[i],
-                                                      GPIO_INT_EDGE_TO_ACTIVE);
-                if (ret != 0) {
-                        printk("Error %d: failed to configure interrupt on %s pin %d\n",
-                               ret, buttons[i].port->name, buttons[i].pin);
-                        return;
-                }
-
-                gpio_init_callback(&button_cb_data[i], button_pressed, BIT(buttons[i].pin));
-                gpio_add_callback(buttons[i].port, &button_cb_data[i]);
-                printk("Set up button at %s pin %d\n", buttons[i].port->name, buttons[i].pin);
-        }
 }
 
 static void server_disconnect(void)
@@ -469,10 +393,12 @@ int main(void)
         int err;
         printk("UDP sample has started\n");
 
-        button_init();
 
-        PSM_Enable = gpio_pin_get_dt(&buttons[2]);
-        RAI_Enable = gpio_pin_get_dt(&buttons[3]);
+        err = dk_buttons_init(button_handler);
+        if (err) {
+                printk("Failed to init buttons: %d\n", err);
+                return 1;
+        }
 
         LTE_Connection_Current_State = LTE_STATE_BUSY;
         LTE_Connection_Target_State = LTE_STATE_ON;
